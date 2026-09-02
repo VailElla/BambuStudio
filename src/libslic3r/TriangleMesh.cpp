@@ -601,28 +601,79 @@ template<typename FaceFilter, typename ThrowOnCancelCallback>
 static std::vector<EdgeToFace> create_edge_map(
     const indexed_triangle_set &its, FaceFilter face_filter, ThrowOnCancelCallback throw_on_cancel)
 {
+    constexpr size_t min_bucket_sort_edges = 1u << 20;
+    const size_t potential_edge_count = its.indices.size() * 3;
+    const bool try_bucket_sort = potential_edge_count >= min_bucket_sort_edges &&
+                                 its.vertices.size() <= potential_edge_count * 2;
+
     std::vector<EdgeToFace> edges_map;
-    edges_map.reserve(its.indices.size() * 3);
-    for (uint32_t facet_idx = 0; facet_idx < its.indices.size(); ++ facet_idx)
+    edges_map.reserve(potential_edge_count);
+    std::vector<size_t> bucket_offsets(try_bucket_sort ? its.vertices.size() + 1 : 0, 0);
+    bool valid_dense_vertex_ids = try_bucket_sort;
+    for (uint32_t facet_idx = 0; facet_idx < its.indices.size(); ++facet_idx)
         if (face_filter(facet_idx))
-            for (int i = 0; i < 3; ++ i) {
-                edges_map.push_back({});
-                EdgeToFace &e2f = edges_map.back();
-                e2f.vertex_low  = its.indices[facet_idx][i];
-                e2f.vertex_high = its.indices[facet_idx][(i + 1) % 3];
-                e2f.face        = facet_idx;
+            for (int edge_idx = 0; edge_idx < 3; ++edge_idx) {
+                int vertex_low  = its.indices[facet_idx][edge_idx];
+                int vertex_high = its.indices[facet_idx][(edge_idx + 1) % 3];
                 // 1 based indexing, to be always strictly positive.
-                e2f.face_edge   = i + 1;
-                if (e2f.vertex_low > e2f.vertex_high) {
-                    // Sort the vertices
-                    std::swap(e2f.vertex_low, e2f.vertex_high);
-                    // and make the face_edge negative to indicate a flipped edge.
-                    e2f.face_edge = - e2f.face_edge;
+                int face_edge = edge_idx + 1;
+                if (vertex_low > vertex_high) {
+                    std::swap(vertex_low, vertex_high);
+                    // A negative face edge indicates that the endpoints were flipped.
+                    face_edge = -face_edge;
+                }
+                edges_map.push_back({vertex_low, vertex_high, int(facet_idx), face_edge});
+
+                if (valid_dense_vertex_ids) {
+                    if (vertex_low < 0 || size_t(vertex_high) >= its.vertices.size())
+                        valid_dense_vertex_ids = false;
+                    else
+                        ++bucket_offsets[size_t(vertex_low) + 1];
                 }
             }
     throw_on_cancel();
-    std::sort(edges_map.begin(), edges_map.end());
 
+    if (!valid_dense_vertex_ids || edges_map.size() < min_bucket_sort_edges) {
+        std::sort(edges_map.begin(), edges_map.end());
+        return edges_map;
+    }
+
+    // Vertex ids in an indexed mesh are dense. Counting by the lower endpoint turns one global
+    // O(E log E) sort into a linear partition followed by tiny, cache-local sorts of each vertex's
+    // incident edges. Equal edges keep face order, making non-manifold pairing deterministic.
+    for (size_t vertex_idx = 1; vertex_idx < bucket_offsets.size(); ++vertex_idx)
+        bucket_offsets[vertex_idx] += bucket_offsets[vertex_idx - 1];
+
+    std::vector<size_t> bucket_write_positions(bucket_offsets.begin(), bucket_offsets.end() - 1);
+    std::vector<EdgeToFace> bucketed_edges(edges_map.size());
+    for (const EdgeToFace &edge : edges_map)
+        bucketed_edges[bucket_write_positions[size_t(edge.vertex_low)]++] = edge;
+    throw_on_cancel();
+
+    execution::for_each(ex_tbb, size_t(0), its.vertices.size(), [&](size_t vertex_idx) {
+        const size_t begin = bucket_offsets[vertex_idx];
+        const size_t end   = bucket_offsets[vertex_idx + 1];
+        if (end - begin < 2)
+            return;
+
+        if (end - begin <= 32) {
+            // Stable insertion sort is faster for the usual low-valence mesh vertex.
+            for (size_t edge_idx = begin + 1; edge_idx < end; ++edge_idx) {
+                EdgeToFace edge = bucketed_edges[edge_idx];
+                size_t insert_idx = edge_idx;
+                while (insert_idx > begin && edge.vertex_high < bucketed_edges[insert_idx - 1].vertex_high) {
+                    bucketed_edges[insert_idx] = bucketed_edges[insert_idx - 1];
+                    --insert_idx;
+                }
+                bucketed_edges[insert_idx] = edge;
+            }
+        } else {
+            std::stable_sort(bucketed_edges.begin() + begin, bucketed_edges.begin() + end,
+                [](const EdgeToFace &left, const EdgeToFace &right) { return left.vertex_high < right.vertex_high; });
+        }
+    }, 4096);
+
+    edges_map.swap(bucketed_edges);
     return edges_map;
 }
 
