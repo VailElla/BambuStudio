@@ -24,7 +24,12 @@
  *
  **************************************************************************/
 
-#include  "miniz.h"
+#if defined(MINIZ_USE_SYSTEM_CRC32)
+#define MINIZ_NO_ZLIB_COMPATIBLE_NAMES
+#include <zlib.h>
+#endif
+
+#include "miniz.h"
 
 typedef unsigned char mz_validate_uint16[sizeof(mz_uint16) == 2 ? 1 : -1];
 typedef unsigned char mz_validate_uint32[sizeof(mz_uint32) == 4 ? 1 : -1];
@@ -65,7 +70,14 @@ mz_ulong mz_adler32(mz_ulong adler, const unsigned char *ptr, size_t buf_len)
 }
 
 /* Karl Malbrain's compact CRC-32. See "A compact CCITT crc16 and crc32 C implementation that balances processor cache usage against speed": http://www.geocities.com/malbrain/ */
-#if 0
+#if defined(MINIZ_USE_SYSTEM_CRC32)
+mz_ulong mz_crc32(mz_ulong crc, const mz_uint8 *ptr, size_t buf_len)
+{
+    if (!ptr)
+        return MZ_CRC32_INIT;
+    return (mz_ulong)crc32_z((uLong)crc, (const Bytef *)ptr, (z_size_t)buf_len);
+}
+#elif 0
     mz_ulong mz_crc32(mz_ulong crc, const mz_uint8 *ptr, size_t buf_len)
     {
         static const mz_uint32 s_crc32[16] = { 0, 0x1db71064, 0x3b6e20c8, 0x26d930ac, 0x76dc4190, 0x6b6b51f4, 0x4db26158, 0x5005713c,

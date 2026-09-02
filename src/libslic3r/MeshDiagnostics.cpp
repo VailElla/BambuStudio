@@ -7,7 +7,9 @@
 #include <numeric>
 #include <vector>
 
+#include <tbb/parallel_for.h>
 #include <tbb/parallel_sort.h>
+#include <tbb/task_arena.h>
 
 namespace Slic3r {
 
@@ -38,6 +40,65 @@ struct TopologyEdgeRef {
 static_assert(sizeof(TopologyEdgeRef) == 12, "Keep topology records compact");
 
 static constexpr uint32_t topology_direction_bit = uint32_t(1) << 31;
+
+// Stable LSD radix sorting preserves the original ascending face order inside
+// equal edge groups. That is required by the legacy greedy face-pairing rule,
+// while avoiding millions of branch-heavy edge comparisons on large meshes.
+static void topology_parallel_radix_sort(std::vector<TopologyEdgeRef> &edges)
+{
+    constexpr size_t radix_bits = 16;
+    constexpr size_t radix_size = size_t(1) << radix_bits;
+    constexpr size_t radix_mask = radix_size - 1;
+    constexpr size_t pass_count = 64 / radix_bits;
+
+    const size_t concurrency = std::max<size_t>(1, tbb::this_task_arena::max_concurrency());
+    const size_t block_count = std::min(concurrency, std::max<size_t>(1, edges.size() / 262'144));
+
+    std::vector<TopologyEdgeRef> scratch(edges.size());
+    std::vector<size_t> counts(block_count * radix_size);
+    std::vector<size_t> offsets(block_count * radix_size);
+    TopologyEdgeRef *src = edges.data();
+    TopologyEdgeRef *dst = scratch.data();
+
+    for (size_t pass = 0; pass < pass_count; ++pass) {
+        std::fill(counts.begin(), counts.end(), size_t(0));
+        const unsigned component_shift = static_cast<unsigned>((pass & 1) * radix_bits);
+        const bool     use_v0          = pass >= 2;
+
+        tbb::parallel_for(size_t(0), block_count, [&](size_t block_idx) {
+            size_t *local_counts = counts.data() + block_idx * radix_size;
+            const size_t begin = edges.size() * block_idx / block_count;
+            const size_t end   = edges.size() * (block_idx + 1) / block_count;
+            for (size_t i = begin; i < end; ++i) {
+                const uint32_t component = use_v0 ? src[i].v0 : src[i].v1;
+                ++local_counts[(component >> component_shift) & radix_mask];
+            }
+        });
+
+        size_t bucket_begin = 0;
+        for (size_t bucket = 0; bucket < radix_size; ++bucket) {
+            size_t block_begin = bucket_begin;
+            for (size_t block_idx = 0; block_idx < block_count; ++block_idx) {
+                const size_t idx = block_idx * radix_size + bucket;
+                offsets[idx] = block_begin;
+                block_begin += counts[idx];
+            }
+            bucket_begin = block_begin;
+        }
+
+        tbb::parallel_for(size_t(0), block_count, [&](size_t block_idx) {
+            size_t *local_offsets = offsets.data() + block_idx * radix_size;
+            const size_t begin = edges.size() * block_idx / block_count;
+            const size_t end   = edges.size() * (block_idx + 1) / block_count;
+            for (size_t i = begin; i < end; ++i) {
+                const uint32_t component = use_v0 ? src[i].v0 : src[i].v1;
+                dst[local_offsets[(component >> component_shift) & radix_mask]++] = src[i];
+            }
+        });
+
+        std::swap(src, dst);
+    }
+}
 
 static uint32_t topology_root(std::vector<uint32_t> &parent, uint32_t idx)
 {
@@ -308,7 +369,7 @@ bool its_topology_stats(const indexed_triangle_set &its, MeshTopologyStats &resu
     };
 
     if (edges.size() >= 1'000'000)
-        tbb::parallel_sort(edges.begin(), edges.end(), edge_less);
+        topology_parallel_radix_sort(edges);
     else
         std::sort(edges.begin(), edges.end(), edge_less);
 
