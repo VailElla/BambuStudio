@@ -202,6 +202,19 @@ int NetworkAgent::initialize_network_module(bool using_backup, bool validate_cer
     if (!self_cert_summary)
         BOOST_LOG_TRIVIAL(info) << "self cert not exist";
 
+    const auto is_trusted_module_publisher = [&self_cert_summary](const SignerSummary& module) {
+        if (!self_cert_summary || IsSamePublisher(*self_cert_summary, module))
+            return true;
+#if defined(__APPLE__)
+        // Local source builds are signed by the developer, while Bambu's closed
+        // networking plug-in remains signed by Bambu Lab.  Accept that one
+        // validated publisher explicitly instead of disabling verification.
+        return module.team_id == "T3UBR9Y3B2";
+#else
+        return false;
+#endif
+    };
+
     //first load the library
 #if defined(_MSC_VER) || defined(_WIN32)
     library = plugin_folder.string() + "\\" + std::string(BAMBU_NETWORK_LIBRARY) + ".dll";
@@ -211,7 +224,7 @@ int NetworkAgent::initialize_network_module(bool using_backup, bool validate_cer
     if (self_cert_summary) {
         module_cert_summary = SummarizeModule(library);
         if (module_cert_summary) {
-            if (IsSamePublisher(*self_cert_summary, *module_cert_summary))
+            if (is_trusted_module_publisher(*module_cert_summary))
                 networking_module = LoadLibrary(lib_wstr);
             else
                 BOOST_LOG_TRIVIAL(info) << "module is from another publisher:" << module_cert_summary->as_print();
@@ -233,7 +246,7 @@ int NetworkAgent::initialize_network_module(bool using_backup, bool validate_cer
         if (self_cert_summary) {
             module_cert_summary = SummarizeModule(library_path);
             if (module_cert_summary) {
-                if (IsSamePublisher(*self_cert_summary, *module_cert_summary))
+                if (is_trusted_module_publisher(*module_cert_summary))
                     networking_module = LoadLibrary(lib_wstr);
                 else
                     BOOST_LOG_TRIVIAL(info) << "module is from another publisher:" << module_cert_summary->as_print();
@@ -255,7 +268,7 @@ int NetworkAgent::initialize_network_module(bool using_backup, bool validate_cer
     if (self_cert_summary) {
         module_cert_summary = SummarizeModule(library);
         if (module_cert_summary) {
-            if (IsSamePublisher(*self_cert_summary, *module_cert_summary))
+            if (is_trusted_module_publisher(*module_cert_summary))
                 networking_module = dlopen(library.c_str(), RTLD_LAZY);
             else
                 BOOST_LOG_TRIVIAL(info) << "module is from another publisher:" << module_cert_summary->as_print();

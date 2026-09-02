@@ -276,6 +276,15 @@ namespace Slic3r {
             CFRelease(url);
             if (st != errSecSuccess || !code) return std::nullopt;
 
+            // A signer identity is only meaningful if the complete Mach-O still
+            // satisfies its embedded code-signing requirements.  Without this
+            // check, a modified plug-in could retain stale certificate metadata.
+            st = SecStaticCodeCheckValidity(code, kSecCSStrictValidate | kSecCSCheckAllArchitectures, nullptr);
+            if (st != errSecSuccess) {
+                CFRelease(code);
+                return std::nullopt;
+            }
+
             SignerSummary s{};
             bool          ok = fill_from_static_code(code, s);
             CFRelease(code);
