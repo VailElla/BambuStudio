@@ -18,6 +18,9 @@
 #include <limits>
 #include <stdexcept>
 #include <iomanip>
+#include <atomic>
+#include <charconv>
+#include <string_view>
 
 #include <boost/assign.hpp>
 #include <boost/bimap.hpp>
@@ -5382,8 +5385,6 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             if (has_transform)
                 volume->source.transform = Slic3r::Geometry::Transformation(volume_matrix_to_object);
 
-            volume->calculate_convex_hull();
-
             // Save the color data of this volume（TriangleColor）
             if (!m_is_bbl_3mf && sub_object->geometry.triangle_colors.size() == triangles_count) {
                 VolumeColorInfo vol_color_info;
@@ -5410,17 +5411,17 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                 volume->seam_facets.reserve(triangles_count);
                 volume->mmu_segmentation_facets.reserve(triangles_count);
                 for (size_t i=0; i<triangles_count; ++i) {
-                    assert(i < sub_object->geometry.custom_supports.size());
-                    assert(i < sub_object->geometry.custom_fuzzy_skin.size());
-                    assert(i < sub_object->geometry.custom_seam.size());
-                    assert(i < sub_object->geometry.mmu_segmentation.size());
-                    if (! sub_object->geometry.custom_supports[i].empty())
+                    assert(sub_object->geometry.custom_supports.empty() || i < sub_object->geometry.custom_supports.size());
+                    assert(sub_object->geometry.custom_fuzzy_skin.empty() || i < sub_object->geometry.custom_fuzzy_skin.size());
+                    assert(sub_object->geometry.custom_seam.empty() || i < sub_object->geometry.custom_seam.size());
+                    assert(sub_object->geometry.mmu_segmentation.empty() || i < sub_object->geometry.mmu_segmentation.size());
+                    if (!sub_object->geometry.custom_supports.empty() && !sub_object->geometry.custom_supports[i].empty())
                         volume->supported_facets.set_triangle_from_string(i, sub_object->geometry.custom_supports[i]);
-                    if (!sub_object->geometry.custom_fuzzy_skin[i].empty())
+                    if (!sub_object->geometry.custom_fuzzy_skin.empty() && !sub_object->geometry.custom_fuzzy_skin[i].empty())
                         volume->fuzzy_skin_facets.set_triangle_from_string(i, sub_object->geometry.custom_fuzzy_skin[i]);
-                    if (! sub_object->geometry.custom_seam[i].empty())
+                    if (!sub_object->geometry.custom_seam.empty() && !sub_object->geometry.custom_seam[i].empty())
                         volume->seam_facets.set_triangle_from_string(i, sub_object->geometry.custom_seam[i]);
-                    if (! sub_object->geometry.mmu_segmentation[i].empty())
+                    if (!sub_object->geometry.mmu_segmentation.empty() && !sub_object->geometry.mmu_segmentation[i].empty())
                         volume->mmu_segmentation_facets.set_triangle_from_string(i, sub_object->geometry.mmu_segmentation[i]);
                 }
                 volume->supported_facets.shrink_to_fit();
@@ -5566,8 +5567,6 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             // stores the volume matrix taken from the metadata, if present
             if (has_transform)
                 volume->source.transform = Slic3r::Geometry::Transformation(volume_matrix_to_object);
-            volume->calculate_convex_hull();
-
             // recreate custom supports, seam and mmu segmentation from previously loaded attribute
             volume->supported_facets.reserve(triangles_count);
             volume->fuzzy_skin_facets.reserve(triangles_count);
@@ -5575,17 +5574,17 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             volume->mmu_segmentation_facets.reserve(triangles_count);
             for (size_t i=0; i<triangles_count; ++i) {
                 size_t index = volume_data.first_triangle_id + i;
-                assert(index < geometry.custom_supports.size());
-                assert(index < geometry.custom_fuzzy_skin.size());
-                assert(index < geometry.custom_seam.size());
-                assert(index < geometry.mmu_segmentation.size());
-                if (! geometry.custom_supports[index].empty())
+                assert(geometry.custom_supports.empty() || index < geometry.custom_supports.size());
+                assert(geometry.custom_fuzzy_skin.empty() || index < geometry.custom_fuzzy_skin.size());
+                assert(geometry.custom_seam.empty() || index < geometry.custom_seam.size());
+                assert(geometry.mmu_segmentation.empty() || index < geometry.mmu_segmentation.size());
+                if (!geometry.custom_supports.empty() && !geometry.custom_supports[index].empty())
                     volume->supported_facets.set_triangle_from_string(i, geometry.custom_supports[index]);
-                if (!geometry.custom_fuzzy_skin[index].empty())
+                if (!geometry.custom_fuzzy_skin.empty() && !geometry.custom_fuzzy_skin[index].empty())
                     volume->fuzzy_skin_facets.set_triangle_from_string(i, geometry.custom_fuzzy_skin[index]);
-                if (! geometry.custom_seam[index].empty())
+                if (!geometry.custom_seam.empty() && !geometry.custom_seam[index].empty())
                     volume->seam_facets.set_triangle_from_string(i, geometry.custom_seam[index]);
-                if (! geometry.mmu_segmentation[index].empty())
+                if (!geometry.mmu_segmentation.empty() && !geometry.mmu_segmentation[index].empty())
                     volume->mmu_segmentation_facets.set_triangle_from_string(i, geometry.mmu_segmentation[index]);
             }
             volume->supported_facets.shrink_to_fit();
@@ -6118,6 +6117,173 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             return false;
         }
 
+        // Bambu-generated object files normally contain one plain mesh whose vertex
+        // and triangle records are independent. Expat has to process every one of
+        // those records serially, which dominates opening high-resolution projects.
+        // Use an order-preserving parallel parser only for that narrow form and fall
+        // back to the general XML parser as soon as extensions are present.
+        if (stat.m_uncomp_size >= 32 * 1024 * 1024) {
+            size_t extracted_size = 0;
+            std::unique_ptr<void, decltype(&mz_free)> extracted(
+                mz_zip_reader_extract_to_heap(&archive, stat.m_file_index, &extracted_size, 0), &mz_free);
+
+            if (extracted && extracted_size == stat.m_uncomp_size) {
+                const std::string_view xml(static_cast<const char *>(extracted.get()), extracted_size);
+                constexpr std::string_view vertices_open       = "<vertices>";
+                constexpr std::string_view vertices_close      = "</vertices>";
+                constexpr std::string_view triangles_open      = "<triangles>";
+                constexpr std::string_view triangles_close     = "</triangles>";
+                constexpr std::string_view vertex_record       = "<vertex ";
+                constexpr std::string_view triangle_record     = "<triangle ";
+                const size_t vertices_tag_pos                   = xml.find(vertices_open);
+                const size_t vertices_begin                     = vertices_tag_pos == std::string_view::npos ? std::string_view::npos : vertices_tag_pos + vertices_open.size();
+                const size_t vertices_end                       = vertices_begin == std::string_view::npos ? std::string_view::npos : xml.find(vertices_close, vertices_begin);
+                const size_t triangles_tag_pos                  = vertices_end == std::string_view::npos ? std::string_view::npos : xml.find(triangles_open, vertices_end + vertices_close.size());
+                const size_t triangles_begin                    = triangles_tag_pos == std::string_view::npos ? std::string_view::npos : triangles_tag_pos + triangles_open.size();
+                const size_t triangles_end                      = triangles_begin == std::string_view::npos ? std::string_view::npos : xml.find(triangles_close, triangles_begin);
+
+                const bool simple_structure =
+                    vertices_tag_pos != std::string_view::npos && vertices_end != std::string_view::npos &&
+                    triangles_tag_pos != std::string_view::npos && triangles_end != std::string_view::npos &&
+                    vertices_end < triangles_tag_pos &&
+                    xml.find(vertices_open, vertices_begin) == std::string_view::npos &&
+                    xml.find(triangles_open, triangles_begin) == std::string_view::npos &&
+                    xml.find("<components", vertices_tag_pos) == std::string_view::npos &&
+                    xml.substr(0, vertices_tag_pos).find("unit=\"millimeter\"") != std::string_view::npos &&
+                    xml.substr(0, vertices_tag_pos).find("BambuStudio:3mfVersion") != std::string_view::npos;
+
+                if (simple_structure) {
+                    constexpr size_t block_size = 4 * 1024 * 1024;
+                    auto record_offsets = [&xml](size_t begin, size_t end, std::string_view record) {
+                        const size_t block_count = (end - begin + block_size - 1) / block_size;
+                        std::vector<size_t> offsets(block_count + 1, 0);
+                        tbb::parallel_for(tbb::blocked_range<size_t>(0, block_count),
+                            [&xml, begin, end, record, &offsets](const tbb::blocked_range<size_t> &range) {
+                                for (size_t block = range.begin(); block < range.end(); ++block) {
+                                    const size_t block_begin = begin + block * block_size;
+                                    const size_t block_end   = std::min(block_begin + block_size, end);
+                                    size_t count = 0;
+                                    for (size_t pos = xml.find(record, block_begin); pos != std::string_view::npos && pos < block_end; pos = xml.find(record, pos + record.size()))
+                                        ++count;
+                                    offsets[block + 1] = count;
+                                }
+                            });
+                        for (size_t block = 0; block < block_count; ++block)
+                            offsets[block + 1] += offsets[block];
+                        return offsets;
+                    };
+
+                    const std::vector<size_t> vertex_offsets   = record_offsets(vertices_begin, vertices_end, vertex_record);
+                    const std::vector<size_t> triangle_offsets = record_offsets(triangles_begin, triangles_end, triangle_record);
+                    Geometry parsed_geometry;
+                    parsed_geometry.vertices.resize(vertex_offsets.back());
+                    parsed_geometry.triangles.resize(triangle_offsets.back());
+                    std::atomic_bool parse_ok{!parsed_geometry.vertices.empty() && !parsed_geometry.triangles.empty()};
+
+                    auto attribute = [&xml](size_t record_begin, size_t record_end, std::string_view name, const char *&value_begin, const char *&value_end) {
+                        const size_t key_pos = xml.find(name, record_begin);
+                        if (key_pos == std::string_view::npos || key_pos >= record_end)
+                            return false;
+                        const size_t begin = key_pos + name.size();
+                        const size_t end   = xml.find('"', begin);
+                        if (end == std::string_view::npos || end > record_end)
+                            return false;
+                        value_begin = xml.data() + begin;
+                        value_end   = xml.data() + end;
+                        return true;
+                    };
+
+                    const size_t vertex_block_count = vertex_offsets.size() - 1;
+                    tbb::parallel_for(tbb::blocked_range<size_t>(0, vertex_block_count),
+                        [&xml, vertices_begin, vertices_end, vertex_record, &vertex_offsets, &parsed_geometry, &attribute, &parse_ok](const tbb::blocked_range<size_t> &range) {
+                            for (size_t block = range.begin(); block < range.end() && parse_ok.load(std::memory_order_relaxed); ++block) {
+                                const size_t block_begin = vertices_begin + block * block_size;
+                                const size_t block_end   = std::min(block_begin + block_size, vertices_end);
+                                size_t output_idx = vertex_offsets[block];
+                                for (size_t pos = xml.find(vertex_record, block_begin); pos != std::string_view::npos && pos < block_end; pos = xml.find(vertex_record, pos + vertex_record.size())) {
+                                    const size_t record_end = xml.find("/>", pos + vertex_record.size());
+                                    if (record_end == std::string_view::npos || record_end >= vertices_end) {
+                                        parse_ok.store(false, std::memory_order_relaxed);
+                                        break;
+                                    }
+                                    size_t equals_count = 0;
+                                    for (size_t p = xml.find('=', pos); p != std::string_view::npos && p < record_end; p = xml.find('=', p + 1))
+                                        ++equals_count;
+                                    const char *xb, *xe, *yb, *ye, *zb, *ze;
+                                    Vec3f value;
+                                    if (equals_count != 3 || !attribute(pos, record_end, "x=\"", xb, xe) ||
+                                        !attribute(pos, record_end, "y=\"", yb, ye) || !attribute(pos, record_end, "z=\"", zb, ze) ||
+                                        fast_float::from_chars(xb, xe, value.x()).ec != std::errc() ||
+                                        fast_float::from_chars(yb, ye, value.y()).ec != std::errc() ||
+                                        fast_float::from_chars(zb, ze, value.z()).ec != std::errc()) {
+                                        parse_ok.store(false, std::memory_order_relaxed);
+                                        break;
+                                    }
+                                    parsed_geometry.vertices[output_idx++] = value;
+                                }
+                            }
+                        });
+
+                    const size_t triangle_block_count = triangle_offsets.size() - 1;
+                    tbb::parallel_for(tbb::blocked_range<size_t>(0, triangle_block_count),
+                        [&xml, triangles_begin, triangles_end, triangle_record, &triangle_offsets, &parsed_geometry, &attribute, &parse_ok](const tbb::blocked_range<size_t> &range) {
+                            for (size_t block = range.begin(); block < range.end() && parse_ok.load(std::memory_order_relaxed); ++block) {
+                                const size_t block_begin = triangles_begin + block * block_size;
+                                const size_t block_end   = std::min(block_begin + block_size, triangles_end);
+                                size_t output_idx = triangle_offsets[block];
+                                for (size_t pos = xml.find(triangle_record, block_begin); pos != std::string_view::npos && pos < block_end; pos = xml.find(triangle_record, pos + triangle_record.size())) {
+                                    const size_t record_end = xml.find("/>", pos + triangle_record.size());
+                                    if (record_end == std::string_view::npos || record_end >= triangles_end) {
+                                        parse_ok.store(false, std::memory_order_relaxed);
+                                        break;
+                                    }
+                                    size_t equals_count = 0;
+                                    for (size_t p = xml.find('=', pos); p != std::string_view::npos && p < record_end; p = xml.find('=', p + 1))
+                                        ++equals_count;
+                                    const char *v1b, *v1e, *v2b, *v2e, *v3b, *v3e;
+                                    Vec3i value;
+                                    if (equals_count != 3 || !attribute(pos, record_end, "v1=\"", v1b, v1e) ||
+                                        !attribute(pos, record_end, "v2=\"", v2b, v2e) || !attribute(pos, record_end, "v3=\"", v3b, v3e) ||
+                                        std::from_chars(v1b, v1e, value.x()).ec != std::errc() ||
+                                        std::from_chars(v2b, v2e, value.y()).ec != std::errc() ||
+                                        std::from_chars(v3b, v3e, value.z()).ec != std::errc()) {
+                                        parse_ok.store(false, std::memory_order_relaxed);
+                                        break;
+                                    }
+                                    parsed_geometry.triangles[output_idx++] = value;
+                                }
+                            }
+                        });
+
+                    if (parse_ok.load(std::memory_order_relaxed)) {
+                        object_xml_parser = XML_ParserCreate(nullptr);
+                        if (object_xml_parser == nullptr) {
+                            top_importer->add_error("Unable to create parser for "+object_path);
+                            return false;
+                        }
+                        XML_SetUserData(object_xml_parser, (void*)this);
+                        XML_SetElementHandler(object_xml_parser, _BBS_3MF_Importer::ObjectImporter::_handle_object_start_model_xml_element, _BBS_3MF_Importer::ObjectImporter::_handle_object_end_model_xml_element);
+                        XML_SetEntityDeclHandler(object_xml_parser, nullptr);
+                        XML_SetExternalEntityRefHandler(object_xml_parser, nullptr);
+
+                        const auto parse_chunk = [this, &xml](size_t begin, size_t end, bool final) {
+                            return XML_Parse(object_xml_parser, xml.data() + begin, int(end - begin), final ? 1 : 0) != XML_STATUS_ERROR && !obj_parse_error;
+                        };
+                        if (!parse_chunk(0, vertices_begin, false) ||
+                            !parse_chunk(vertices_end, triangles_begin, false) ||
+                            !parse_chunk(triangles_end, xml.size(), true) || object_list.size() != 1) {
+                            top_importer->add_error("Unable to parse simple mesh structure for "+object_path);
+                            return false;
+                        }
+                        object_list.begin()->second.geometry.swap(parsed_geometry);
+                        BOOST_LOG_TRIVIAL(info) << boost::format("Loaded %1% vertices and %2% triangles with the parallel 3MF parser from %3%")
+                            % object_list.begin()->second.geometry.vertices.size() % object_list.begin()->second.geometry.triangles.size() % object_path;
+                        return true;
+                    }
+                }
+            }
+        }
+
         object_xml_parser = XML_ParserCreate(nullptr);
         if (object_xml_parser == nullptr) {
             top_importer->add_error("Unable to create parser for "+object_path);
@@ -6126,7 +6292,6 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
 
         XML_SetUserData(object_xml_parser, (void*)this);
         XML_SetElementHandler(object_xml_parser, _BBS_3MF_Importer::ObjectImporter::_handle_object_start_model_xml_element, _BBS_3MF_Importer::ObjectImporter::_handle_object_end_model_xml_element);
-        XML_SetCharacterDataHandler(object_xml_parser, _BBS_3MF_Importer::ObjectImporter::_handle_object_xml_characters);
         XML_SetEntityDeclHandler(object_xml_parser, nullptr);
         XML_SetExternalEntityRefHandler(object_xml_parser, nullptr);
 

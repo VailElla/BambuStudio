@@ -1243,6 +1243,22 @@ private:
         if (mesh.facets_count() > 1)
             calculate_convex_hull();
     }
+    ModelVolume(ModelObject *object, TriangleMesh &&mesh, ModelVolumeType type = ModelVolumeType::MODEL_PART) : m_mesh(std::make_shared<const TriangleMesh>(std::move(mesh))), m_type(type), object(object)
+    {
+		assert(this->id().valid());
+        assert(this->config.id().valid());
+        assert(this->supported_facets.id().valid());
+        assert(this->fuzzy_skin_facets.id().valid());
+        assert(this->seam_facets.id().valid());
+        assert(this->mmu_segmentation_facets.id().valid());
+        assert(this->id() != this->config.id());
+        assert(this->id() != this->supported_facets.id());
+        assert(this->id() != this->fuzzy_skin_facets.id());
+        assert(this->id() != this->seam_facets.id());
+        assert(this->id() != this->mmu_segmentation_facets.id());
+        if (m_mesh->facets_count() > 1)
+            calculate_convex_hull();
+    }
     ModelVolume(ModelObject *object, const std::shared_ptr<const TriangleMesh> &mesh, ModelVolumeType type = ModelVolumeType::MODEL_PART) : m_mesh(mesh), m_type(type), object(object)
     {
 		assert(this->id().valid());

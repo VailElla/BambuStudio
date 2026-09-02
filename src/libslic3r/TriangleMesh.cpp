@@ -49,10 +49,16 @@ static void fill_initial_stats(const indexed_triangle_set &its, TriangleMeshStat
     out.volume              = its_volume(its);
     update_bounding_box(its, out);
 
-    const std::vector<Vec3i> face_neighbors = its_face_neighbors(its);
-    out.number_of_parts = its_number_of_patches(its, face_neighbors);
+    MeshTopologyStats topology_stats;
+    if (its_topology_stats(its, topology_stats)) {
+        out.number_of_parts = topology_stats.number_of_parts;
+    } else {
+        const std::vector<Vec3i> face_neighbors = its_face_neighbors(its);
+        out.number_of_parts = its_number_of_patches(its, face_neighbors);
+        topology_stats.edge_stats = its_edge_diagnostics(its);
+    }
 
-    const auto nm_stats       = its_edge_diagnostics(its);
+    const auto &nm_stats = topology_stats.edge_stats;
     assert(nm_stats.open_edges <= INT_MAX && nm_stats.non_manifold_edges <= INT_MAX && nm_stats.non_manifold_vertices <= INT_MAX);
     out.open_edges            = static_cast<int>(nm_stats.open_edges);
     out.non_manifold_edges    = static_cast<int>(nm_stats.non_manifold_edges);

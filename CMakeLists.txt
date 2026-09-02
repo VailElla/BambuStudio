@@ -49,8 +49,17 @@ option(SLIC3R_MSVC_COMPILE_PARALLEL "Compile on Visual Studio in parallel" 1)
 option(SLIC3R_MSVC_PDB          "Generate PDB files on MSVC in Release mode" 1)
 option(SLIC3R_PERL_XS           "Compile XS Perl module and enable Perl unit and integration tests" 0)
 option(SLIC3R_ASAN              "Enable ASan on Clang and GCC" 0)
+option(BBL_M4_NATIVE_OPTIMIZATION "Optimize Release builds for the local Apple M4 CPU and enable ThinLTO" OFF)
 # If SLIC3R_FHS is 1 -> SLIC3R_DESKTOP_INTEGRATION is always 0, othrewise variable.
 CMAKE_DEPENDENT_OPTION(SLIC3R_DESKTOP_INTEGRATION "Allow performing desktop integration during runtime" 1 "NOT SLIC3R_FHS" 0)
+
+if (BBL_M4_NATIVE_OPTIMIZATION)
+    if (NOT APPLE OR NOT CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64)$" OR NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+        message(FATAL_ERROR "BBL_M4_NATIVE_OPTIMIZATION requires Apple Silicon and Clang")
+    endif ()
+    add_compile_options("$<$<CONFIG:Release>:-mcpu=apple-m4>" "$<$<CONFIG:Release>:-flto=thin>")
+    add_link_options("$<$<CONFIG:Release>:-flto=thin>")
+endif ()
 
 set(OPENVDB_FIND_MODULE_PATH "" CACHE PATH "Path to OpenVDB installation's find modules.")
 

@@ -571,6 +571,17 @@ std::pair<size_t, size_t> find_previous_and_next_perimeter_point(const std::vect
 }
 
 // Computes all global model info - transforms object, performs raycasting
+void transform_vertices_parallel(indexed_triangle_set &mesh, const Transform3d &transform)
+{
+    tbb::parallel_for(tbb::blocked_range<size_t>(0, mesh.vertices.size(), 4096),
+        [&mesh, &transform](const tbb::blocked_range<size_t> &range) {
+            for (size_t vertex_idx = range.begin(); vertex_idx < range.end(); ++vertex_idx) {
+                stl_vertex &vertex = mesh.vertices[vertex_idx];
+                vertex = (transform * vertex.cast<double>()).cast<float>().eval();
+            }
+        });
+}
+
 void compute_global_occlusion(GlobalModelInfo &result, const PrintObject *po, std::function<void(void)> throw_if_canceled)
 {
     BOOST_LOG_TRIVIAL(debug) << "SeamPlacer: gather occlusion meshes: start";
@@ -582,11 +593,17 @@ void compute_global_occlusion(GlobalModelInfo &result, const PrintObject *po, st
         if (model_volume->type() == ModelVolumeType::MODEL_PART || model_volume->type() == ModelVolumeType::NEGATIVE_VOLUME) {
             auto                 model_transformation = model_volume->get_matrix();
             indexed_triangle_set model_its            = model_volume->mesh().its;
-            its_transform(model_its, model_transformation);
+            transform_vertices_parallel(model_its, model_transformation);
             if (model_volume->type() == ModelVolumeType::MODEL_PART) {
-                its_merge(triangle_set, model_its);
+                if (triangle_set.empty())
+                    triangle_set = std::move(model_its);
+                else
+                    its_merge(triangle_set, model_its);
             } else {
-                its_merge(negative_volumes_set, model_its);
+                if (negative_volumes_set.empty())
+                    negative_volumes_set = std::move(model_its);
+                else
+                    its_merge(negative_volumes_set, model_its);
             }
         }
     }
@@ -601,7 +618,7 @@ void compute_global_occlusion(GlobalModelInfo &result, const PrintObject *po, st
 
     size_t negative_volumes_start_index = triangle_set.indices.size();
     its_merge(triangle_set, negative_volumes_set);
-    its_transform(triangle_set, obj_transform);
+    transform_vertices_parallel(triangle_set, obj_transform);
     BOOST_LOG_TRIVIAL(debug) << "SeamPlacer: decimate: end";
 
     BOOST_LOG_TRIVIAL(debug) << "SeamPlacer: Compute visibility sample points: start";

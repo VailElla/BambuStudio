@@ -1,37 +1,95 @@
 #include "ShortEdgeCollapse.hpp"
 #include "libslic3r/NormalUtils.hpp"
 
-#include <unordered_map>
-#include <unordered_set>
 #include <random>
 #include <algorithm>
+#include <cstdint>
+#include <limits>
+#include <numeric>
+
+#include <tbb/blocked_range.h>
+#include <tbb/parallel_for.h>
 
 namespace Slic3r {
+
+namespace {
+
+// Compact the surviving face indices without changing their order. Keeping the
+// order stable is important because the next collapse pass uses a deterministic
+// shuffle, while splitting the two linear scans lets large meshes use all cores.
+void stable_filter_faces_parallel(const std::vector<size_t> &face_indices,
+                                  const std::vector<uint8_t> &face_removal_flags,
+                                  std::vector<size_t>       &filtered_face_indices)
+{
+    constexpr size_t block_size = 1 << 16;
+    const size_t     block_count = (face_indices.size() + block_size - 1) / block_size;
+
+    if (block_count < 2) {
+        filtered_face_indices.clear();
+        for (size_t face_idx : face_indices)
+            if (!face_removal_flags[face_idx])
+                filtered_face_indices.push_back(face_idx);
+        return;
+    }
+
+    std::vector<size_t> block_offsets(block_count + 1, 0);
+    tbb::parallel_for(tbb::blocked_range<size_t>(0, block_count),
+        [&face_indices, &face_removal_flags, &block_offsets](const tbb::blocked_range<size_t> &range) {
+            for (size_t block = range.begin(); block < range.end(); ++block) {
+                const size_t begin = block * block_size;
+                const size_t end   = std::min(begin + block_size, face_indices.size());
+                size_t       count = 0;
+                for (size_t idx = begin; idx < end; ++idx)
+                    count += !face_removal_flags[face_indices[idx]];
+                block_offsets[block + 1] = count;
+            }
+        });
+
+    for (size_t block = 0; block < block_count; ++block)
+        block_offsets[block + 1] += block_offsets[block];
+
+    filtered_face_indices.resize(block_offsets.back());
+    tbb::parallel_for(tbb::blocked_range<size_t>(0, block_count),
+        [&face_indices, &face_removal_flags, &block_offsets, &filtered_face_indices](const tbb::blocked_range<size_t> &range) {
+            for (size_t block = range.begin(); block < range.end(); ++block) {
+                const size_t begin = block * block_size;
+                const size_t end   = std::min(begin + block_size, face_indices.size());
+                size_t       output_idx = block_offsets[block];
+                for (size_t idx = begin; idx < end; ++idx) {
+                    const size_t face_idx = face_indices[idx];
+                    if (!face_removal_flags[face_idx])
+                        filtered_face_indices[output_idx++] = face_idx;
+                }
+            }
+        });
+}
+
+} // namespace
 
 void its_short_edge_collpase(indexed_triangle_set &mesh, size_t target_triangle_count) {
     // whenever vertex is removed, its mapping is update to the index of vertex with wich it merged
     std::vector<size_t> vertices_index_mapping(mesh.vertices.size());
-    for (size_t idx = 0; idx < vertices_index_mapping.size(); ++idx) {
-        vertices_index_mapping[idx] = idx;
-    }
+    std::iota(vertices_index_mapping.begin(), vertices_index_mapping.end(), size_t(0));
     // Algorithm uses get_final_index query to get the actual vertex index. The query also updates all mappings on the way, essentially flattening the mapping
-    std::vector<size_t> flatten_queue;
-    auto get_final_index = [&vertices_index_mapping, &flatten_queue](const size_t &orig_index) {
-        flatten_queue.clear();
+    auto get_final_index = [&vertices_index_mapping](const size_t orig_index) {
+        size_t root = orig_index;
+        while (vertices_index_mapping[root] != root)
+            root = vertices_index_mapping[root];
+
         size_t idx = orig_index;
         while (vertices_index_mapping[idx] != idx) {
-            flatten_queue.push_back(idx);
-            idx = vertices_index_mapping[idx];
+            const size_t next = vertices_index_mapping[idx];
+            vertices_index_mapping[idx] = root;
+            idx = next;
         }
-        for (size_t i : flatten_queue) {
-            vertices_index_mapping[i] = idx;
-        }
-        return idx;
-
+        return root;
     };
 
     // if face is removed, mark it here
-    std::vector<bool> face_removal_flags(mesh.indices.size(), false);
+    // A byte per face is intentionally used instead of vector<bool>. The
+    // decimator repeatedly probes and updates these flags, and byte addressing
+    // is substantially cheaper than packed bit proxy operations.
+    std::vector<uint8_t> face_removal_flags(mesh.indices.size(), 0);
 
     std::vector<Vec3i> triangles_neighbors = its_face_neighbors_par(mesh);
 
@@ -81,9 +139,7 @@ void its_short_edge_collpase(indexed_triangle_set &mesh, size_t target_triangle_
 
     std::mt19937_64 generator { 27644437 };// default constant seed! so that results are deterministic
     std::vector<size_t> face_indices(mesh.indices.size());
-    for (size_t idx = 0; idx < face_indices.size(); ++idx) {
-        face_indices[idx] = idx;
-    }
+    std::iota(face_indices.begin(), face_indices.end(), size_t(0));
     //tmp face indices used only for swapping
     std::vector<size_t> tmp_face_indices(mesh.indices.size());
 
@@ -142,12 +198,7 @@ void its_short_edge_collpase(indexed_triangle_set &mesh, size_t target_triangle_
 
         // filter face_indices, remove those that have been collapsed
         size_t prev_size = face_indices.size();
-        tmp_face_indices.clear();
-        for (size_t face_idx : face_indices) {
-            if (!face_removal_flags[face_idx]){
-                tmp_face_indices.push_back(face_idx);
-            }
-        }
+        stable_filter_faces_parallel(face_indices, face_removal_flags, tmp_face_indices);
         face_indices.swap(tmp_face_indices);
 
         decimation_ratio = float(prev_size - face_indices.size()) / float(prev_size);
@@ -155,9 +206,14 @@ void its_short_edge_collpase(indexed_triangle_set &mesh, size_t target_triangle_
     }
 
     //Extract the result mesh
-    std::unordered_map<size_t, size_t> final_vertices_mapping;
+    // Dense scratch mapping trades memory for speed and deterministic O(1)
+    // lookup. The previous unordered_map was costly on multi-million-face
+    // meshes even though source vertex indices are already dense.
+    constexpr size_t no_vertex = std::numeric_limits<size_t>::max();
+    std::vector<size_t> final_vertices_mapping(mesh.vertices.size(), no_vertex);
     std::vector<Vec3f> final_vertices;
     std::vector<Vec3i> final_indices;
+    final_vertices.reserve(std::min(mesh.vertices.size(), face_indices.size() * 3));
     final_indices.reserve(face_indices.size());
     for (size_t idx : face_indices) {
         Vec3i final_face;
@@ -169,11 +225,12 @@ void its_short_edge_collpase(indexed_triangle_set &mesh, size_t target_triangle_
         }
 
         for (size_t i = 0; i < 3; ++i) {
-            if (final_vertices_mapping.find(final_face[i]) == final_vertices_mapping.end()) {
-                final_vertices_mapping[final_face[i]] = final_vertices.size();
+            size_t &mapped_vertex = final_vertices_mapping[final_face[i]];
+            if (mapped_vertex == no_vertex) {
+                mapped_vertex = final_vertices.size();
                 final_vertices.push_back(mesh.vertices[final_face[i]]);
             }
-            final_face[i] = final_vertices_mapping[final_face[i]];
+            final_face[i] = mapped_vertex;
         }
 
         final_indices.push_back(final_face);
@@ -184,4 +241,3 @@ void its_short_edge_collpase(indexed_triangle_set &mesh, size_t target_triangle_
 }
 
 } //namespace Slic3r
-

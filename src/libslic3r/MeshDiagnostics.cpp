@@ -2,8 +2,12 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdint>
+#include <limits>
 #include <numeric>
 #include <vector>
+
+#include <tbb/parallel_sort.h>
 
 namespace Slic3r {
 
@@ -20,6 +24,46 @@ struct EdgeRef {
     size_t v0_fan_idx;
     size_t v1_fan_idx;
 };
+
+// Compact record used by its_topology_stats(). The top bit of face_and_dir
+// stores whether the directed face edge runs from the lower to the higher
+// vertex index. Face indices fit in the remaining 31 bits because the legacy
+// face-neighbor representation stores them in signed ints as well.
+struct TopologyEdgeRef {
+    uint32_t v0;
+    uint32_t v1;
+    uint32_t face_and_dir;
+};
+
+static_assert(sizeof(TopologyEdgeRef) == 12, "Keep topology records compact");
+
+static constexpr uint32_t topology_direction_bit = uint32_t(1) << 31;
+
+static uint32_t topology_root(std::vector<uint32_t> &parent, uint32_t idx)
+{
+    uint32_t root = idx;
+    while (parent[root] != root)
+        root = parent[root];
+
+    while (parent[idx] != idx) {
+        const uint32_t next = parent[idx];
+        parent[idx] = root;
+        idx = next;
+    }
+
+    return root;
+}
+
+static bool topology_union(std::vector<uint32_t> &parent, uint32_t a, uint32_t b)
+{
+    const uint32_t root_a = topology_root(parent, a);
+    const uint32_t root_b = topology_root(parent, b);
+    if (root_a == root_b)
+        return false;
+
+    parent[root_b] = root_a;
+    return true;
+}
 
 static size_t fan_root(std::vector<size_t> &parent, size_t idx)
 {
@@ -198,7 +242,10 @@ MeshDiagnosticStats its_edge_diagnostics(const indexed_triangle_set &its)
         }
     }
 
-    std::sort(edges.begin(), edges.end());
+    if (edges.size() >= 1'000'000)
+        tbb::parallel_sort(edges.begin(), edges.end());
+    else
+        std::sort(edges.begin(), edges.end());
 
     for (size_t i = 0; i < edges.size();) {
         size_t j = i + 1;
@@ -215,6 +262,100 @@ MeshDiagnosticStats its_edge_diagnostics(const indexed_triangle_set &its)
     }
 
     return result;
+}
+
+bool its_topology_stats(const indexed_triangle_set &its, MeshTopologyStats &result)
+{
+    result = {};
+
+    const size_t num_vertices = its.vertices.size();
+    const size_t num_faces    = its.indices.size();
+    if (num_faces == 0)
+        return true;
+
+    if (num_faces > std::numeric_limits<int32_t>::max() ||
+        num_faces > std::numeric_limits<size_t>::max() / 3)
+        return false;
+
+    std::vector<TopologyEdgeRef> edges(num_faces * 3);
+    for (size_t face_idx = 0; face_idx < num_faces; ++face_idx) {
+        const auto &face = its.indices[face_idx];
+        if (face[0] < 0 || face[1] < 0 || face[2] < 0 ||
+            static_cast<size_t>(face[0]) >= num_vertices ||
+            static_cast<size_t>(face[1]) >= num_vertices ||
+            static_cast<size_t>(face[2]) >= num_vertices ||
+            face[0] == face[1] || face[1] == face[2] || face[2] == face[0])
+            return false;
+
+        for (int edge_idx = 0; edge_idx < 3; ++edge_idx) {
+            const uint32_t va = static_cast<uint32_t>(face[edge_idx]);
+            const uint32_t vb = static_cast<uint32_t>(face[(edge_idx + 1) % 3]);
+            const bool     forward = va < vb;
+            edges[face_idx * 3 + edge_idx] = {
+                std::min(va, vb),
+                std::max(va, vb),
+                static_cast<uint32_t>(face_idx) | (forward ? topology_direction_bit : 0)
+            };
+        }
+    }
+
+    const auto edge_less = [](const TopologyEdgeRef &a, const TopologyEdgeRef &b) {
+        if (a.v0 != b.v0)
+            return a.v0 < b.v0;
+        if (a.v1 != b.v1)
+            return a.v1 < b.v1;
+        return (a.face_and_dir & ~topology_direction_bit) < (b.face_and_dir & ~topology_direction_bit);
+    };
+
+    if (edges.size() >= 1'000'000)
+        tbb::parallel_sort(edges.begin(), edges.end(), edge_less);
+    else
+        std::sort(edges.begin(), edges.end(), edge_less);
+
+    std::vector<uint32_t> face_parent(num_faces);
+    std::iota(face_parent.begin(), face_parent.end(), uint32_t(0));
+    result.number_of_parts = num_faces;
+
+    for (size_t group_begin = 0; group_begin < edges.size();) {
+        size_t group_end = group_begin + 1;
+        while (group_end < edges.size() &&
+               edges[group_end].v0 == edges[group_begin].v0 &&
+               edges[group_end].v1 == edges[group_begin].v1)
+            ++group_end;
+
+        const size_t face_count = group_end - group_begin;
+        if (face_count == 1)
+            ++result.edge_stats.open_edges;
+        else if (face_count > 2)
+            ++result.edge_stats.non_manifold_edges;
+
+        // Match create_face_neighbors_index(): visit faces in ascending order
+        // and greedily pair each edge with the first later edge whose winding
+        // is opposite. Each sorted edge group is independent.
+        for (size_t i = group_begin; i < group_end; ++i) {
+            if (edges[i].face_and_dir == std::numeric_limits<uint32_t>::max())
+                continue;
+
+            const bool direction = (edges[i].face_and_dir & topology_direction_bit) != 0;
+            for (size_t j = i + 1; j < group_end; ++j) {
+                if (edges[j].face_and_dir == std::numeric_limits<uint32_t>::max() ||
+                    ((edges[j].face_and_dir & topology_direction_bit) != 0) == direction)
+                    continue;
+
+                const uint32_t face_a = edges[i].face_and_dir & ~topology_direction_bit;
+                const uint32_t face_b = edges[j].face_and_dir & ~topology_direction_bit;
+                if (topology_union(face_parent, face_a, face_b))
+                    --result.number_of_parts;
+                edges[i].face_and_dir = std::numeric_limits<uint32_t>::max();
+                edges[j].face_and_dir = std::numeric_limits<uint32_t>::max();
+                break;
+            }
+        }
+
+        group_begin = group_end;
+    }
+
+    return true;
 }
 
 

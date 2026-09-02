@@ -1480,6 +1480,7 @@ ModelVolume* ModelObject::add_volume(const ModelVolume &other, TriangleMesh &&me
 ModelVolume* ModelObject::add_volume_with_shared_mesh(const ModelVolume &other, ModelVolumeType type /*= ModelVolumeType::INVALID*/)
 {
     ModelVolume* v = new ModelVolume(this, other.m_mesh);
+    v->set_convex_hull_shared_ptr(other.get_convex_hull_shared_ptr());
     if (type != ModelVolumeType::INVALID && v->type() != type)
         v->set_type(type);
     this->volumes.push_back(v);

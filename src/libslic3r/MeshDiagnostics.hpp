@@ -11,6 +11,11 @@ struct MeshDiagnosticStats {
     size_t open_edges            = 0;
 };
 
+struct MeshTopologyStats {
+    size_t              number_of_parts = 0;
+    MeshDiagnosticStats edge_stats;
+};
+
 // Detect topological defects on an indexed triangle set.
 //
 // Reported defects:
@@ -29,6 +34,11 @@ MeshDiagnosticStats its_mesh_diagnostics(const indexed_triangle_set &its);
 // and open/boundary edges (face count == 1). Skips non-manifold vertex detection.
 // non_manifold_vertices in the returned stats is always 0.
 MeshDiagnosticStats its_edge_diagnostics(const indexed_triangle_set &its);
+
+// Calculate connected parts and edge diagnostics from one shared, sorted edge
+// stream. Returns false for malformed or degenerate meshes so callers may use
+// the legacy routines, whose special-case behavior is intentionally preserved.
+bool its_topology_stats(const indexed_triangle_set &its, MeshTopologyStats &result);
 
 } // namespace Slic3r
 

@@ -189,7 +189,6 @@ void recreate_model_volume(ModelObject *model_object, int volume_idx, const Tria
 
     ModelVolume *model_volume     = model_object->volumes[volume_idx];
     ModelVolume *new_model_volume = model_object->add_volume(mesh, false);
-    new_model_volume->calculate_convex_hull();
     new_model_volume->set_transformation(text_tran.get_matrix());
     new_model_volume->set_text_info(text_info);
     new_model_volume->name = model_volume->name;
@@ -206,7 +205,6 @@ void create_text_volume(Slic3r::ModelObject *model_object, const TriangleMesh &m
     wxGetApp().plater()->take_snapshot("create_text_volume");
 
     ModelVolume *new_model_volume = model_object->add_volume(mesh, false);
-    new_model_volume->calculate_convex_hull();
     new_model_volume->set_transformation(text_tran.get_matrix());
     new_model_volume->set_text_info(text_info);
     if (model_object->config.option("extruder")) {
@@ -2011,7 +2009,6 @@ void CreateObjectTextJob::finalize(bool canceled, std::exception_ptr &eptr) {
         new_object->invalidate_bounding_box();
 
         ModelVolume *new_volume = new_object->add_volume(std::move(final_mesh), false);
-        new_volume->calculate_convex_hull();
         new_volume->name        = _u8L("Text");
         // set a default extruder value, since user can't add it manually
         new_volume->config.set_key_value("extruder", new ConfigOptionInt(1));
