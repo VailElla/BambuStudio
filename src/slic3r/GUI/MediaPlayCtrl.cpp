@@ -27,6 +27,7 @@
 #endif
 #ifdef __APPLE__
 #include <ApplicationServices/ApplicationServices.h>
+#include "DeviceCore/BambuMcpBridge.hpp"
 #endif
 
 #include <wx/clipbrd.h>
@@ -249,6 +250,16 @@ void MediaPlayCtrl::SetMachineObject(MachineObject* obj)
         m_lan_passwd     = obj->get_access_code();
         m_device_busy    = obj->is_camera_busy_off();
         m_tutk_state     = obj->tutk_state;
+#ifdef __APPLE__
+        // X2D advertises only the cloud TUTK liveview in its printer profile,
+        // but its LAN RTSP camera is available and is the working path on macOS.
+        // Prefer that path when the device has a reachable LAN address and an
+        // access code; this avoids the signed-host restriction in the TUTK path.
+        if (is_x2d_printer(obj->printer_type) && !m_lan_ip.empty() && !m_lan_passwd.empty()) {
+            m_lan_proto = MachineObject::LVL_Rtsps;
+            m_lan_mode = true;
+        }
+#endif
     } else {
         m_obj = nullptr;
         m_camera_exists = false;

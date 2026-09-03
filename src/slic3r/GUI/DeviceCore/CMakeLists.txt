@@ -6,6 +6,8 @@
 list(APPEND SLIC3R_GUI_SOURCES
     GUI/DeviceCore/DevAxis.h
     GUI/DeviceCore/DevAxis.cpp
+    GUI/DeviceCore/BambuMcpBridge.hpp
+    GUI/DeviceCore/BambuMcpBridge.cpp
     GUI/DeviceCore/DevAxisCtrl.cpp
     GUI/DeviceCore/DevBed.cpp
     GUI/DeviceCore/DevBed.h

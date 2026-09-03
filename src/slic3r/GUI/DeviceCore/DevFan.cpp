@@ -1,5 +1,6 @@
 #include <nlohmann/json.hpp>
 #include "DevFan.h"
+#include "BambuMcpBridge.hpp"
 #include <wx/app.h>
 #include "slic3r/GUI/DeviceManager.hpp"
 #include "slic3r/GUI/GUI.hpp"
@@ -76,6 +77,23 @@ int Slic3r::DevFan::command_control_fan(int fan_type, int val)
 int Slic3r::DevFan::command_control_fan_new(int fan_id, int val)
 {
     BOOST_LOG_TRIVIAL(info) << "New protocol of fan setting(set speed), fan_id = " << fan_id;
+#ifdef __APPLE__
+    if (m_owner && is_x2d_printer(m_owner->printer_type)) {
+        std::string fan_name;
+        switch (fan_id) {
+        case FAN_COOLING_0_AIRDOOR: fan_name = "part"; break;
+        case FAN_REMOTE_COOLING_0_IDX: fan_name = "auxiliary"; break;
+        case FAN_REMOTE_COOLING_1_IDX: fan_name = "right_auxiliary"; break;
+        case FAN_CHAMBER_0_IDX: fan_name = "chamber"; break;
+        default: break;
+        }
+        if (!fan_name.empty() && dispatch_bambu_mcp("set_fan_speed", {{"fan", fan_name}, {"speed", std::to_string(val)}, {"confirm_during_print", "true"}}) > 0) {
+            return 0;
+        }
+        BOOST_LOG_TRIVIAL(error) << "X2D bambu-mcp fan bridge unavailable; refusing the known-ineffective unsigned MQTT fallback";
+        return -1;
+    }
+#endif
     json j;
     j["print"]["command"]     = "set_fan";
     j["print"]["sequence_id"] = std::to_string(MachineObject::m_sequence_id++);

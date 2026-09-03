@@ -45,6 +45,7 @@
 #include "DeviceCore/DevBed.h"
 #include "DeviceCore/DevLamp.h"
 #include "DeviceCore/DevFan.h"
+#include "DeviceCore/BambuMcpBridge.hpp"
 #include "DeviceCore/DevStatus.h"
 #include "DeviceCore/DevStorage.h"
 #include "DeviceCore/DevNozzleRack.h"
@@ -1570,6 +1571,15 @@ int MachineObject::command_stop_buzzer()
 
 int MachineObject::command_set_bed(int temp)
 {
+#ifdef __APPLE__
+    if (is_x2d_printer(printer_type)) {
+        if (dispatch_bambu_mcp("set_temperature", {{"component", "bed"}, {"temperature", std::to_string(temp)}, {"confirm_during_print", "true"}}) > 0) {
+            return 0;
+        }
+        BOOST_LOG_TRIVIAL(error) << "X2D bambu-mcp temperature bridge unavailable; refusing the known-ineffective unsigned MQTT fallback";
+        return -1;
+    }
+#endif
     if (m_support_mqtt_bet_ctrl)
     {
         json j;
