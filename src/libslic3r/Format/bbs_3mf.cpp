@@ -693,6 +693,21 @@ static std::string bbs_join_path_within_dir(const std::string& base_dir, const s
 
 namespace Slic3r {
 
+namespace {
+
+bool validate_archive_file(const std::string &filename, mz_zip_error &error)
+{
+    error = MZ_ZIP_NO_ERROR;
+    return mz_zip_validate_file_archive(filename.c_str(), 0, &error) != MZ_FALSE;
+}
+
+std::string archive_validation_error(const std::string &filename, mz_zip_error error)
+{
+    return "Saved 3MF archive failed integrity validation for " + PathSanitizer::sanitize(filename) + ": " + mz_zip_get_error_string(error);
+}
+
+}
+
 void PlateData::parse_filament_info(GCodeProcessorResult *result)
 {
     if (!result) return;
@@ -6514,17 +6529,26 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         }
         boost::system::error_code ec;
         std::string filename = std::string(store_params.path);
-        boost::filesystem::remove(filename + ".tmp", ec);
+        const std::string temp_filename = filename + ".tmp";
+        boost::filesystem::remove(temp_filename, ec);
 
-        bool result = _save_model_to_file(filename + ".tmp", *store_params.model, store_params.plate_data_list, store_params.project_presets, store_params.config,
+        bool result = _save_model_to_file(temp_filename, *store_params.model, store_params.plate_data_list, store_params.project_presets, store_params.config,
                                           store_params.thumbnail_data, store_params.no_light_thumbnail_data, store_params.top_thumbnail_data, store_params.pick_thumbnail_data,
                                           store_params.proFn,
             store_params.calibration_thumbnail_data, store_params.id_bboxes, store_params.project, store_params.export_plate_idx);
         if (result) {
-            boost::filesystem::rename(filename + ".tmp", filename, ec);
+            mz_zip_error zip_error = MZ_ZIP_NO_ERROR;
+            if (!validate_archive_file(temp_filename, zip_error)) {
+                add_error(archive_validation_error(temp_filename, zip_error));
+                BOOST_LOG_TRIVIAL(error) << archive_validation_error(temp_filename, zip_error);
+                boost::filesystem::remove(temp_filename, ec);
+                return false;
+            }
+
+            boost::filesystem::rename(temp_filename, filename, ec);
             if (ec) {
                 add_error("Failed to rename file: " + ec.message());
-                boost::filesystem::remove(filename + ".tmp", ec);
+                boost::filesystem::remove(temp_filename, ec);
                 return false;
             }
             if (!(store_params.strategy & SaveStrategy::Silence))
@@ -6579,11 +6603,29 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             volumes_objectID.insert({volume, (++volume_count << 16 | obj_id)});
         }
 
-        _add_model_file_to_archive(filename.str(), archive, model, objects_data);
+        if (!_add_model_file_to_archive(filename.str(), archive, model, objects_data))
+            return false;
 
-        mz_zip_writer_finalize_archive(&archive);
+        if (!mz_zip_writer_finalize_archive(&archive)) {
+            add_error("Unable to finalize backup mesh archive");
+            return false;
+        }
         lock.close();
+
+        mz_zip_error zip_error = MZ_ZIP_NO_ERROR;
+        if (!validate_archive_file(filepath_tmp, zip_error)) {
+            add_error(archive_validation_error(filepath_tmp, zip_error));
+            BOOST_LOG_TRIVIAL(error) << archive_validation_error(filepath_tmp, zip_error);
+            boost::filesystem::remove(filepath_tmp, ec);
+            return false;
+        }
+
         boost::filesystem::rename(filepath_tmp, filepath, ec);
+        if (ec) {
+            add_error("Failed to rename backup mesh archive: " + ec.message());
+            boost::filesystem::remove(filepath_tmp, ec);
+            return false;
+        }
         return true;
     }
 

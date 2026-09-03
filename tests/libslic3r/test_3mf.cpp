@@ -3,10 +3,44 @@
 #include "libslic3r/Model.hpp"
 #include "libslic3r/Format/3mf.hpp"
 #include "libslic3r/Format/STL.hpp"
+#include "miniz.h"
 
 #include <boost/filesystem/operations.hpp>
 
+#include <algorithm>
+#include <string>
+
 using namespace Slic3r;
+
+SCENARIO("Staged ZIP members retain their CRC after finalization", "[3mf][zip]") {
+    std::string payload(256 * 1024, '\0');
+    for (std::size_t i = 0; i < payload.size(); ++i)
+        payload[i] = static_cast<char>((i * 37u + 11u) & 0xffu);
+
+    mz_zip_archive archive;
+    mz_zip_zero_struct(&archive);
+    REQUIRE(mz_zip_writer_init_heap(&archive, 0, 1024 * 1024));
+
+    mz_zip_writer_staged_context context;
+    REQUIRE(mz_zip_writer_add_staged_open(&archive, &context, "3D/3dmodel.model", payload.size() + 1024,
+                                          nullptr, nullptr, 0, MZ_DEFAULT_COMPRESSION,
+                                          nullptr, 0, nullptr, 0));
+    for (std::size_t offset = 0; offset < payload.size(); offset += 65536) {
+        const std::size_t size = std::min<std::size_t>(65536, payload.size() - offset);
+        REQUIRE(mz_zip_writer_add_staged_data(&context, payload.data() + offset, size));
+    }
+    REQUIRE(mz_zip_writer_add_staged_finish(&context));
+
+    void *archive_buffer = nullptr;
+    size_t archive_size = 0;
+    REQUIRE(mz_zip_writer_finalize_heap_archive(&archive, &archive_buffer, &archive_size));
+    REQUIRE(mz_zip_writer_end(&archive));
+
+    mz_zip_error zip_error = MZ_ZIP_NO_ERROR;
+    REQUIRE(mz_zip_validate_mem_archive(archive_buffer, archive_size, 0, &zip_error));
+
+    mz_free(archive_buffer);
+}
 
 SCENARIO("Reading 3mf file", "[3mf]") {
     GIVEN("umlauts in the path of the file") {
@@ -130,4 +164,3 @@ SCENARIO("2D convex hull of sinking object", "[3mf]") {
         }
     }
 }
-
