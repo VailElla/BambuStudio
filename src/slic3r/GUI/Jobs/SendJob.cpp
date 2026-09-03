@@ -5,6 +5,8 @@
 #include "slic3r/GUI/Plater.hpp"
 #include "slic3r/GUI/GUI.hpp"
 #include "slic3r/GUI/GUI_App.hpp"
+#include "slic3r/GUI/DeviceCore/BambuMcpBridge.hpp"
+#include "slic3r/GUI/DeviceCore/DevManager.h"
 
 namespace Slic3r {
 namespace GUI {
@@ -114,6 +116,16 @@ void SendJob::process()
     wxString msg;
     int curr_percent = 10;
     NetworkAgent* m_agent = wxGetApp().getAgent();
+#ifdef __APPLE__
+    DeviceManager* mcp_device_manager = wxGetApp().getDeviceManager();
+    MachineObject* mcp_machine = mcp_device_manager ? mcp_device_manager->get_my_machine(m_dev_id) : nullptr;
+    if (!mcp_machine && mcp_device_manager)
+        mcp_machine = mcp_device_manager->get_selected_machine();
+    const bool is_x2d_mcp_job = !m_dev_ip.empty() && mcp_machine && is_x2d_printer(mcp_machine->printer_type)
+        && (!m_is_check_mode || m_check_and_continue);
+#else
+    const bool is_x2d_mcp_job = false;
+#endif
     AppConfig* config = wxGetApp().app_config;
     int result = -1;
     //unsigned int http_code;
@@ -135,17 +147,19 @@ void SendJob::process()
     params.filename = job_data._temp_path.string();
     params.connection_type = this->connection_type;
 
-    result = m_agent->start_send_gcode_to_sdcard(params, nullptr, nullptr, nullptr);
-    if (result != 0) {
-        BOOST_LOG_TRIVIAL(error) << "access code is invalid";
-        m_enter_ip_address_fun_fail(result);
-        m_job_finished = true;
-        return;
-    }
-    else if(m_is_check_mode && !m_check_and_continue){
-        m_enter_ip_address_fun_success();
-        m_job_finished = true;
-        return;
+    if (!is_x2d_mcp_job) {
+        result = m_agent->start_send_gcode_to_sdcard(params, nullptr, nullptr, nullptr);
+        if (result != 0) {
+            BOOST_LOG_TRIVIAL(error) << "access code is invalid";
+            m_enter_ip_address_fun_fail(result);
+            m_job_finished = true;
+            return;
+        }
+        else if(m_is_check_mode && !m_check_and_continue){
+            m_enter_ip_address_fun_success();
+            m_job_finished = true;
+            return;
+        }
     }
 
 
@@ -305,7 +319,27 @@ void SendJob::process()
         };
 
 
-    if (params.connection_type != "lan") {
+    if (is_x2d_mcp_job) {
+        this->update_status(curr_percent, _L("Sending file through local MCP"));
+
+        std::vector<std::pair<std::string, std::string>> mcp_args;
+        const auto add_mcp_arg = [&mcp_args](const char *key, const std::string &value) {
+            if (!value.empty())
+                mcp_args.emplace_back(key, value);
+        };
+        add_mcp_arg("file_path", params.filename);
+        add_mcp_arg("filename", params.project_name);
+        add_mcp_arg("bambu_model", "x2d");
+        add_mcp_arg("connection_mode", "bambu_native");
+        add_mcp_arg("host", m_dev_ip);
+        add_mcp_arg("bambu_serial", m_dev_id);
+        add_mcp_arg("project_name", params.project_name);
+        mcp_args.emplace_back("plate_index", std::to_string(std::max(0, params.plate_index - 1)));
+        mcp_args.emplace_back("use_ams", params.task_use_ams ? "true" : "false");
+        add_mcp_arg("ams_mapping", params.ams_mapping);
+
+        result = dispatch_bambu_mcp("upload_file", mcp_args) > 0 ? 0 : -1;
+    } else if (params.connection_type != "lan") {
         if (params.dev_ip.empty())
             params.comments = "no_ip";
         else if (this->cloud_print_only)

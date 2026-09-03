@@ -16,6 +16,7 @@
 
 #include "slic3r/GUI/DeviceCore/DevManager.h"
 #include "slic3r/GUI/DeviceCore/DevUtil.h"
+#include "slic3r/GUI/DeviceCore/BambuMcpBridge.hpp"
 
 #include "slic3r/Utils/FileTransferUtils.hpp"
 
@@ -158,6 +159,16 @@ void PrintJob::process()
     int curr_percent = 10;
     NetworkAgent* m_agent = wxGetApp().getAgent();
 
+#ifdef __APPLE__
+    DeviceManager* mcp_device_manager = wxGetApp().getDeviceManager();
+    MachineObject* mcp_machine = mcp_device_manager ? mcp_device_manager->get_my_machine(m_dev_id) : nullptr;
+    if (!mcp_machine && mcp_device_manager)
+        mcp_machine = mcp_device_manager->get_selected_machine();
+    bool is_x2d_mcp_job = m_print_type == "from_normal" && !m_dev_ip.empty() && mcp_machine && is_x2d_printer(mcp_machine->printer_type);
+#else
+    bool is_x2d_mcp_job = false;
+#endif
+
     int result = -1;
     //unsigned int http_code;
     std::string http_body;
@@ -217,7 +228,7 @@ void PrintJob::process()
     params.password = m_access_code;
 
     // check access code and ip address
-    if (this->connection_type == "lan" && m_print_type == "from_normal") {
+    if (this->connection_type == "lan" && m_print_type == "from_normal" && !is_x2d_mcp_job) {
         bool emmc_ok = false;
         bool ftp_ok = false;
         if (could_emmc_print) {
@@ -556,6 +567,11 @@ void PrintJob::process()
     DeviceManager* dev = wxGetApp().getDeviceManager();
     MachineObject* obj = dev->get_selected_machine();
 
+#ifdef __APPLE__
+    if (!is_x2d_mcp_job && m_print_type == "from_normal" && !m_dev_ip.empty() && obj && is_x2d_printer(obj->printer_type))
+        is_x2d_mcp_job = true;
+#endif
+
     auto wait_fn = [this, curr_percent, &obj](int state, std::string job_info) {
             BOOST_LOG_TRIVIAL(info) << "print_job: get_job_info = " << job_info;
 
@@ -719,7 +735,56 @@ void PrintJob::process()
         return normalized_status == "IDLE" || normalized_status == "FINISH" || normalized_status == "FAILED";
     };
 
-    if (m_print_type == "from_sdcard_view") {
+    if (is_x2d_mcp_job) {
+        attempt_route = SendAttemptRoute::LanWithRecord;
+        this->update_status(curr_percent, _L("Sending print job through local MCP"));
+
+        std::vector<std::pair<std::string, std::string>> mcp_args;
+        const auto add_mcp_arg = [&mcp_args](const char *key, const std::string &value) {
+            if (!value.empty())
+                mcp_args.emplace_back(key, value);
+        };
+        const auto add_mcp_bool = [&mcp_args](const char *key, bool value) {
+            mcp_args.emplace_back(key, value ? "true" : "false");
+        };
+
+        add_mcp_arg("three_mf_path", params.filename);
+        add_mcp_arg("bambu_model", "x2d");
+        add_mcp_arg("connection_mode", "bambu_native");
+        add_mcp_arg("host", m_dev_ip);
+        add_mcp_arg("bambu_serial", m_dev_id);
+        add_mcp_arg("project_name", params.project_name);
+        add_mcp_arg("preset_name", params.preset_name);
+        std::string mcp_bed_type = params.task_bed_type;
+        if (mcp_bed_type == "pc") mcp_bed_type = "cool_plate";
+        else if (mcp_bed_type == "pe" || mcp_bed_type == "eng_plate") mcp_bed_type = "engineering_plate";
+        else if (mcp_bed_type == "pei") mcp_bed_type = "hot_plate";
+        else if (mcp_bed_type == "pte") mcp_bed_type = "textured_plate";
+        else if (mcp_bed_type == "suprtack") mcp_bed_type = "supertack_plate";
+        if (mcp_bed_type == "textured_plate" || mcp_bed_type == "cool_plate"
+            || mcp_bed_type == "engineering_plate" || mcp_bed_type == "hot_plate"
+            || mcp_bed_type == "supertack_plate") {
+            add_mcp_arg("bed_type", mcp_bed_type);
+        }
+        mcp_args.emplace_back("plate_index", std::to_string(std::max(0, params.plate_index - 1)));
+        add_mcp_bool("use_ams", params.task_use_ams);
+        add_mcp_bool("bed_leveling", params.task_bed_leveling);
+        add_mcp_bool("flow_calibration", params.task_flow_cali);
+        add_mcp_bool("vibration_calibration", params.task_vibration_cali);
+        add_mcp_bool("layer_inspect", params.task_layer_inspect);
+        add_mcp_bool("timelapse", params.task_record_timelapse);
+        add_mcp_arg("ams_mapping", params.ams_mapping);
+        add_mcp_arg("ams_mapping2", params.ams_mapping2);
+        add_mcp_arg("ams_mapping_info", params.ams_mapping_info);
+        add_mcp_arg("nozzle_mapping", params.nozzle_mapping);
+        add_mcp_arg("nozzles_info", params.nozzles_info);
+
+        if (was_canceled()) {
+            result = BAMBU_NETWORK_ERR_CANCELED;
+        } else {
+            result = dispatch_bambu_mcp("print_3mf", mcp_args) > 0 ? 0 : -1;
+        }
+    } else if (m_print_type == "from_sdcard_view") {
         BOOST_LOG_TRIVIAL(info) << "print_job: try to send with cloud, model is sdcard view";
         attempt_route = SendAttemptRoute::Default;
         this->update_status(curr_percent, _L("Sending print job through cloud service"));

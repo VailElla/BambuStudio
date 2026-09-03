@@ -5,11 +5,75 @@
 #include "MainFrame.hpp"
 #include "GUI_App.hpp"
 #include "BBLUtil.hpp"
+#include "DeviceCore/BambuMcpBridge.hpp"
+#include "DeviceCore/DevManager.h"
+
+#include <algorithm>
 
 using namespace nlohmann;
 
 namespace Slic3r {
 wxDEFINE_EVENT(EVT_MULTI_SEND_LIMIT, wxCommandEvent);
+
+#ifdef __APPLE__
+namespace {
+
+int dispatch_x2d_print(const BBL::PrintParams &params)
+{
+    std::vector<std::pair<std::string, std::string>> mcp_args;
+    const auto add_arg = [&mcp_args](const char *key, const std::string &value) {
+        if (!value.empty())
+            mcp_args.emplace_back(key, value);
+    };
+    const auto add_bool = [&mcp_args](const char *key, bool value) {
+        mcp_args.emplace_back(key, value ? "true" : "false");
+    };
+
+    add_arg("three_mf_path", params.filename);
+    add_arg("bambu_model", "x2d");
+    add_arg("connection_mode", "bambu_native");
+    add_arg("host", params.dev_ip);
+    add_arg("bambu_serial", params.dev_id);
+    add_arg("project_name", params.project_name);
+    add_arg("preset_name", params.preset_name);
+    std::string bed_type = params.task_bed_type;
+    if (bed_type == "pc") bed_type = "cool_plate";
+    else if (bed_type == "pe" || bed_type == "eng_plate") bed_type = "engineering_plate";
+    else if (bed_type == "pei") bed_type = "hot_plate";
+    else if (bed_type == "pte") bed_type = "textured_plate";
+    else if (bed_type == "suprtack") bed_type = "supertack_plate";
+    if (bed_type == "textured_plate" || bed_type == "cool_plate"
+        || bed_type == "engineering_plate" || bed_type == "hot_plate"
+        || bed_type == "supertack_plate") {
+        add_arg("bed_type", bed_type);
+    }
+    mcp_args.emplace_back("plate_index", std::to_string(std::max(0, params.plate_index - 1)));
+    add_bool("use_ams", params.task_use_ams);
+    add_bool("bed_leveling", params.task_bed_leveling);
+    add_bool("flow_calibration", params.task_flow_cali);
+    add_bool("vibration_calibration", params.task_vibration_cali);
+    add_bool("layer_inspect", params.task_layer_inspect);
+    add_bool("timelapse", params.task_record_timelapse);
+    add_arg("ams_mapping", params.ams_mapping);
+    add_arg("ams_mapping2", params.ams_mapping2);
+    add_arg("ams_mapping_info", params.ams_mapping_info);
+    add_arg("nozzle_mapping", params.nozzle_mapping);
+    add_arg("nozzles_info", params.nozzles_info);
+
+    return dispatch_bambu_mcp("print_3mf", mcp_args) > 0 ? 0 : -1;
+}
+
+bool is_x2d_task(const BBL::PrintParams &params)
+{
+    if (params.dev_ip.empty())
+        return false;
+    auto *device_manager = GUI::wxGetApp().getDeviceManager();
+    auto *machine = device_manager ? device_manager->get_my_machine(params.dev_id) : nullptr;
+    return machine && is_x2d_printer(machine->printer_type);
+}
+
+} // namespace
+#endif
 
 int TaskManager::MaxSendingAtSameTime = 5;
 int TaskManager::SendingInterval = 180;
@@ -224,7 +288,17 @@ int TaskManager::schedule(TaskStateInfo* task)
 #if 0
             int result = start_print_test(task->get_params(), task->update_status_fn, task->cancel_fn, task->wait_fn);
 #else
-            int result = m_agent->start_print(task->get_params(), task->update_status_fn, task->cancel_fn, task->wait_fn);
+            int result = -1;
+#ifdef __APPLE__
+            if (is_x2d_task(task->get_params())) {
+                task->update_status_fn(PrintingStageCreate, 0, "Sending print job through local MCP");
+                result = dispatch_x2d_print(task->get_params());
+            } else {
+                result = m_agent->start_print(task->get_params(), task->update_status_fn, task->cancel_fn, task->wait_fn);
+            }
+#else
+            result = m_agent->start_print(task->get_params(), task->update_status_fn, task->cancel_fn, task->wait_fn);
+#endif
 #endif
             if (result == 0) {
                 last_sent_timestamp = std::chrono::system_clock::now();
