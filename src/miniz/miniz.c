@@ -73,8 +73,11 @@ mz_ulong mz_adler32(mz_ulong adler, const unsigned char *ptr, size_t buf_len)
 #if defined(MINIZ_USE_SYSTEM_CRC32)
 mz_ulong mz_crc32(mz_ulong crc, const mz_uint8 *ptr, size_t buf_len)
 {
+    // miniz uses a NULL, zero-length update as a streaming no-op when a
+    // staged ZIP member is finalized. Preserve that behavior when using
+    // the system zlib implementation.
     if (!ptr)
-        return MZ_CRC32_INIT;
+        return buf_len == 0 ? crc : MZ_CRC32_INIT;
     return (mz_ulong)crc32_z((uLong)crc, (const Bytef *)ptr, (z_size_t)buf_len);
 }
 #elif 0
