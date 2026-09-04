@@ -338,7 +338,11 @@ void SendJob::process()
         mcp_args.emplace_back("use_ams", params.task_use_ams ? "true" : "false");
         add_mcp_arg("ams_mapping", params.ams_mapping);
 
-        result = dispatch_bambu_mcp("upload_file", mcp_args) > 0 ? 0 : -1;
+        const long mcp_result = dispatch_bambu_mcp_with_progress(
+            "upload_file", mcp_args, update_fn, cancel_fn);
+        result = mcp_result > 0 ? 0
+            : mcp_result == BAMBU_MCP_DISPATCH_CANCELED ? BAMBU_NETWORK_ERR_CANCELED
+                                                        : -1;
     } else if (params.connection_type != "lan") {
         if (params.dev_ip.empty())
             params.comments = "no_ip";

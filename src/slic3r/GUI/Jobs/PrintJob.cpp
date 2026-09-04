@@ -782,7 +782,11 @@ void PrintJob::process()
         if (was_canceled()) {
             result = BAMBU_NETWORK_ERR_CANCELED;
         } else {
-            result = dispatch_bambu_mcp("print_3mf", mcp_args) > 0 ? 0 : -1;
+            const long mcp_result = dispatch_bambu_mcp_with_progress(
+                "print_3mf", mcp_args, update_fn, cancel_fn);
+            result = mcp_result > 0 ? 0
+                : mcp_result == BAMBU_MCP_DISPATCH_CANCELED ? BAMBU_NETWORK_ERR_CANCELED
+                                                            : -1;
         }
     } else if (m_print_type == "from_sdcard_view") {
         BOOST_LOG_TRIVIAL(info) << "print_job: try to send with cloud, model is sdcard view";

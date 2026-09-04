@@ -6734,7 +6734,7 @@ public:
     void hide_select_machine_dlg()
     {
         if (m_select_machine_dlg)
-            m_select_machine_dlg->EndModal(wxID_OK);
+            m_select_machine_dlg->close_dialog(wxID_OK);
     }
 
     void enter_prepare_mode()

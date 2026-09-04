@@ -577,7 +577,7 @@ SelectMachineDialog::SelectMachineDialog(Plater *plater)
             return;
         }
 
-        EndModal(wxID_CLOSE);
+        close_dialog(wxID_CLOSE);
         Plater *       plater = wxGetApp().plater();
         wxCommandEvent evt(EVT_OPEN_FILAMENT_MAP_SETTINGS_DIALOG);
         evt.SetEventObject(plater);
@@ -2074,6 +2074,9 @@ void SelectMachineDialog::init_timer()
 
 void SelectMachineDialog::on_cancel(wxCloseEvent &event)
 {
+    if (m_close_in_progress)
+        return;
+
     if (m_mapping_popup.IsShown())
         m_mapping_popup.Dismiss();
 
@@ -2083,7 +2086,23 @@ void SelectMachineDialog::on_cancel(wxCloseEvent &event)
             m_print_job->join();
         }
     }
-    this->EndModal(wxID_CANCEL);
+    close_dialog(wxID_CANCEL);
+}
+
+void SelectMachineDialog::close_dialog(int return_code)
+{
+    // This dialog is intentionally retained and shown again by Plater. On
+    // macOS a native close and the queued print-complete event can arrive in
+    // the same close sequence. EndModal() is only valid once; a second call
+    // dereferences wx modal state that has already been cleared.
+    if (m_close_in_progress)
+        return;
+    m_close_in_progress = true;
+
+    if (IsModal())
+        EndModal(return_code);
+    else
+        DPIDialog::Show(false);
 }
 
 bool SelectMachineDialog::is_blocking_printing(MachineObject* obj_)
@@ -2987,7 +3006,7 @@ void SelectMachineDialog::navigate_to_timelapse_page()
         }
     });
 
-    this->EndModal(wxID_CANCEL);
+    close_dialog(wxID_CANCEL);
 }
 
 void SelectMachineDialog::load_option_vals(MachineObject *obj)
@@ -5442,6 +5461,7 @@ void SelectMachineDialog::sys_color_changed()
 bool SelectMachineDialog::Show(bool show)
 {
     if (show) {
+        m_close_in_progress = false;
         EnableEditing(true);
         m_options_other->Show();
         m_refresh_timer->Start(LIST_REFRESH_INTERVAL);

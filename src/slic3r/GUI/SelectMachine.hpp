@@ -313,6 +313,7 @@ private:
     bool                                m_is_rename_mode{ false };
     bool                                m_check_flag {false};
     bool                                m_ext_change_assist{ false };
+    bool                                m_close_in_progress{ false };
     // timelapse internal storage selection
     std::string                         m_timelapse_storage{ "internal" };  // "internal" or "external"
     wxTimer*                            m_timelapse_check_timer { nullptr };
@@ -519,6 +520,7 @@ public:
     void on_rename_enter();
     void update_printer_combobox(wxCommandEvent& event);
     void on_cancel(wxCloseEvent& event);
+    void close_dialog(int return_code = wxID_CANCEL);
     void show_errors(wxString& info);
     void on_ok_btn(wxCommandEvent& event);
     void on_reselect_dialog_btn_clicked(wxMouseEvent&);
