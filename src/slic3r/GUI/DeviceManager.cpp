@@ -2469,9 +2469,52 @@ bool MachineObject::is_camera_busy_off()
     return false;
 }
 
+static bool is_x2d_native_control_message(const json &message)
+{
+    if (!message.contains("print") || !message["print"].is_object())
+        return false;
+
+    const json &print = message["print"];
+    if (!print.contains("command") || !print["command"].is_string())
+        return false;
+
+    const std::string command = print["command"].get<std::string>();
+    if (command == "pause" || command == "resume" || command == "stop" ||
+        command == "ams_change_filament" || command == "ams_user_setting" ||
+        command == "ams_filament_setting" || command == "ams_get_rfid" ||
+        command == "ams_control" || command == "ams_reset" ||
+        command == "ams_filament_drying" || command == "auto_stop_ams_dry")
+        return true;
+
+    if (command == "print_option")
+        return print.contains("auto_switch_filament") || print.contains("air_print_detect");
+
+    if (command == "gcode_line" && print.contains("param") && print["param"].is_string()) {
+        std::string param = print["param"].get<std::string>();
+        boost::algorithm::trim(param);
+        return boost::algorithm::istarts_with(param, "M620 C") ||
+               boost::algorithm::istarts_with(param, "M620 R") ||
+               boost::algorithm::istarts_with(param, "M620 P");
+    }
+
+    return false;
+}
+
 int MachineObject::publish_json(const json& json_item, int qos, int flag)
 {
     int rtn = 0;
+#ifdef __APPLE__
+    if (is_x2d_printer(printer_type) && is_x2d_native_control_message(json_item)) {
+        rtn = dispatch_bambu_mcp("x2d_native_control",
+            {{"message_json", json_item.dump()},
+             {"qos", std::to_string(qos)},
+             {"flag", std::to_string(flag)}}) > 0 ? 0 : -1;
+        if (rtn != 0) {
+            BOOST_LOG_TRIVIAL(error) << "X2D native MCP control failed; command was not sent";
+        }
+        return rtn;
+    }
+#endif
     if (is_lan_mode_printer()) {
         rtn = local_publish_json(json_item.dump(), qos, flag);
     } else {
