@@ -15,6 +15,7 @@
 #include "ReleaseNote.hpp"
 #include <thread>
 #include <mutex>
+#include <set>
 #include <codecvt>
 #include <boost/foreach.hpp>
 #include <boost/typeof/typeof.hpp>
@@ -2471,31 +2472,63 @@ bool MachineObject::is_camera_busy_off()
 
 static bool is_x2d_native_control_message(const json &message)
 {
-    if (!message.contains("print") || !message["print"].is_object())
-        return false;
-
-    const json &print = message["print"];
-    if (!print.contains("command") || !print["command"].is_string())
-        return false;
-
-    const std::string command = print["command"].get<std::string>();
-    if (command == "pause" || command == "resume" || command == "stop" ||
-        command == "ams_change_filament" || command == "ams_user_setting" ||
-        command == "ams_filament_setting" || command == "ams_get_rfid" ||
-        command == "ams_control" || command == "ams_reset" ||
-        command == "ams_filament_drying" || command == "auto_stop_ams_dry")
+    const auto has_command = [&message](const char *section, std::string &command) {
+        if (!message.contains(section) || !message[section].is_object())
+            return false;
+        const json &payload = message[section];
+        if (!payload.contains("command") || !payload["command"].is_string())
+            return false;
+        command = payload["command"].get<std::string>();
         return true;
+    };
 
-    if (command == "print_option")
-        return print.contains("auto_switch_filament") || print.contains("air_print_detect");
+    std::string command;
+    if (has_command("print", command)) {
+        // These are the user-facing X2D controls emitted by MachineObject and
+        // DeviceCore. Read-only state traffic (pushall/get_version) stays on
+        // the persistent Studio connection; firmware upgrades deliberately do
+        // not pass through this unsigned-app compatibility bridge.
+        static const std::set<std::string> native_print_commands {
+            "ams_change_filament", "ams_control", "ams_filament_drying",
+            "ams_filament_setting", "ams_get_rfid", "ams_reset",
+            "ams_user_setting", "auto_stop_ams_dry", "back_to_center",
+            "buzzer_ctrl", "calibration", "clean_print_error", "close_air_filt",
+            "extrusion_cali", "extrusion_cali_del", "extrusion_cali_get",
+            "extrusion_cali_get_result", "extrusion_cali_sel", "extrusion_cali_set",
+            "flowrate_cali", "flowrate_get_result", "gcode_file", "get_auto_nozzle_mapping",
+            "holder_nozzle_refresh", "idle_ignore", "ignore", "nozzle_holder_ctrl",
+            "nozzle_info_confirm", "pause", "print_speed", "refresh_nozzle",
+            "resume", "select_extruder", "set_against_continued_heating_mode",
+            "set_airduct", "set_bed_temp", "set_ctt", "set_extrusion_length", "set_fan",
+            "set_nozzle_temp", "skip_objects", "stop", "xyz_ctrl"
+        };
+        if (native_print_commands.count(command) != 0)
+            return true;
 
-    if (command == "gcode_line" && print.contains("param") && print["param"].is_string()) {
+        if (command == "print_option")
+            return true;
+
+        const json &print = message["print"];
+        if (command != "gcode_line" || !print.contains("param") || !print["param"].is_string())
+            return false;
         std::string param = print["param"].get<std::string>();
         boost::algorithm::trim(param);
         return boost::algorithm::istarts_with(param, "M620 C") ||
                boost::algorithm::istarts_with(param, "M620 R") ||
                boost::algorithm::istarts_with(param, "M620 P");
     }
+
+    if (has_command("system", command))
+        return command == "ledctrl" || command == "uiop" ||
+               command == "set_door_stat" || command == "print_cache_set";
+
+    if (has_command("camera", command))
+        return command == "ipcam_cap_pic_set" || command == "ipcam_record_set" ||
+               command == "ipcam_timelapse" || command == "ipcam_resolution_set" ||
+               command == "ipcam_get_media_info" || command == "ipcam_delete_oldest_timelapse";
+
+    if (has_command("xcam", command))
+        return command == "xcam_control_set";
 
     return false;
 }
