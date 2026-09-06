@@ -4,6 +4,7 @@ add_executable(${_TEST_NAME}_tests
 	${_TEST_NAME}_tests.cpp
 	test_3mf.cpp
 	test_aabbindirect.cpp
+	test_arachne_interpolation.cpp
 	test_clipper_offset.cpp
 	test_clipper_utils.cpp
 	test_config.cpp
@@ -44,3 +45,9 @@ endif()
 
 # catch_discover_tests(${_TEST_NAME}_tests TEST_PREFIX "${_TEST_NAME}: ")
 add_test(${_TEST_NAME}_tests ${_TEST_NAME}_tests ${CATCH_EXTRA_ARGS})
+
+# Small target for the zero-/unequal-bead Arachne crash regression.
+add_executable(arachne_interpolation_tests
+    libslic3r_tests.cpp test_arachne_interpolation.cpp)
+target_link_libraries(arachne_interpolation_tests test_common libslic3r)
+add_test(NAME arachne_interpolation_tests COMMAND arachne_interpolation_tests "[arachne]")

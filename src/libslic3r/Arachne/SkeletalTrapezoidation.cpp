@@ -1733,6 +1733,13 @@ SkeletalTrapezoidation::Beading SkeletalTrapezoidation::interpolate(const Beadin
     assert(next_inset_idx < coord_t(left.toolpath_locations.size()));
     assert(left.toolpath_locations[next_inset_idx] <= switching_radius);
     assert(left.toolpath_locations[next_inset_idx + 1] >= switching_radius);
+    // The inset was found in left, but the ordinary interpolation may select
+    // right (including an empty zero-bead layout) as its result. Only adjust a
+    // switching radius for an inset shared by all three layouts; otherwise keep
+    // the ordinary interpolation, rather than indexing a missing bead.
+    if (size_t(next_inset_idx) >= ret.toolpath_locations.size()
+        || size_t(next_inset_idx) >= right.toolpath_locations.size())
+        return ret;
     if (ret.toolpath_locations[next_inset_idx] > switching_radius)
     { // One inset disappeared between left and the merged one
         // solve for ratio f:
@@ -1755,7 +1762,23 @@ SkeletalTrapezoidation::Beading SkeletalTrapezoidation::interpolate(const Beadin
     float ratio_right_to_whole = 1.0 - ratio_left_to_whole;
 
     Beading ret = (left.total_thickness > right.total_thickness)? left : right;
-    for (size_t inset_idx = 0; inset_idx < std::min(left.bead_widths.size(), right.bead_widths.size()); inset_idx++)
+    const size_t inset_count = std::min({
+        left.bead_widths.size(), right.bead_widths.size(),
+        left.toolpath_locations.size(), right.toolpath_locations.size(),
+        ret.bead_widths.size(), ret.toolpath_locations.size()
+    });
+    if (inset_count != left.bead_widths.size()
+        || inset_count != right.bead_widths.size()
+        || inset_count != left.toolpath_locations.size()
+        || inset_count != right.toolpath_locations.size()
+        || inset_count != ret.bead_widths.size()
+        || inset_count != ret.toolpath_locations.size())
+    {
+        BOOST_LOG_TRIVIAL(warning) << "Arachne beading vectors have inconsistent lengths; truncating interpolation to the valid common prefix.";
+        ret.bead_widths.resize(inset_count);
+        ret.toolpath_locations.resize(inset_count);
+    }
+    for (size_t inset_idx = 0; inset_idx < inset_count; inset_idx++)
     {
         if(left.bead_widths[inset_idx] == 0 || right.bead_widths[inset_idx] == 0)
         {
