@@ -128,6 +128,7 @@ void PrinterFileSystem::SetFileType(FileType type, std::string const &storage)
     m_file_list.swap(m_file_list_cache[{m_file_type, m_file_storage}]);
     std::swap(m_file_type, type);
     m_file_storage = storage;
+    m_last_error = 0;
     if (storage_only_changed)
         m_file_list_cache[{m_file_type, m_file_storage}].clear();
     m_file_list.swap(m_file_list_cache[{m_file_type, m_file_storage}]);
@@ -184,7 +185,10 @@ void PrinterFileSystem::ListAllFiles()
             list.push_back(ff);
         }
         return 0;
-    }, [this, type = m_file_type](int result, FileList list) {
+    }, [this, type = m_file_type, storage = m_file_storage](int result, FileList list) {
+        // Both successful lists and errors belong to the requested storage.
+        if (type != m_file_type || storage != m_file_storage)
+            return 0;
         if (result != 0) {
             m_last_error = result;
             m_status = Status::Failed;
@@ -195,8 +199,6 @@ void PrinterFileSystem::ListAllFiles()
             SendChangedEvent(EVT_FILE_CHANGED);
             return 0;
         }
-        if (type != m_file_type)
-            return 0;
         m_file_list.swap(list);
         for (auto & file : m_file_list)
             file.thumbnail = default_thumbnail;
@@ -1100,7 +1102,12 @@ void PrinterFileSystem::UpdateFocusThumbnail2(std::shared_ptr<std::vector<File>>
             file.path = path;
             return 0;
         },
-        [this, files, type](int result, File const &file) {
+        [this, files, type, file_type = m_file_type, storage = m_file_storage](int result, File const &file) {
+            if (file_type != m_file_type || storage != m_file_storage) {
+                if (result != CONTINUE)
+                    UpdateFocusThumbnail();
+                return;
+            }
             auto n    = file.name.find_last_of('.');
             auto name  = n == std::string::npos ? file.name : file.name.substr(0, n) + ".mp4";
             n          = (type == ModelMetadata) ? std::string::npos : file.path.find_last_of('#');

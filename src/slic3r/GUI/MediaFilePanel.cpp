@@ -14,6 +14,7 @@
 #include <libslic3r/Model.hpp>
 #include <libslic3r/Format/bbs_3mf.hpp>
 #include "DeviceCore/DevStorage.h"
+#include "DeviceCore/BambuMcpBridge.hpp"
 
 #ifdef __WXMSW__
 #include <shellapi.h>
@@ -270,6 +271,13 @@ void MediaFilePanel::UpdateByObj(MachineObject* obj)
         m_local_proto  = obj->file_local;
         m_remote_proto = obj->get_file_remote();
         m_model_download_support = obj->file_model_download;
+#ifdef __APPLE__
+        // Like liveview, X2D file browsing can use LAN while the printer is
+        // cloud-bound. Its remote media tunnel requires an official signed host.
+        if (is_x2d_printer(obj->printer_type) && m_local_proto &&
+            !m_lan_ip.empty() && !m_lan_passwd.empty())
+            m_lan_mode = true;
+#endif
 
         bool support_internal_storage = obj->is_support_model_internal_storage;
         bool support_internal_timelapse = obj->is_support_internal_timelapse;
