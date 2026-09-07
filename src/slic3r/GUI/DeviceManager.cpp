@@ -2380,7 +2380,11 @@ int MachineObject::connect(bool use_openssl)
 
     if (m_agent) {
         try {
-            return m_agent->connect_printer(get_dev_id(), get_dev_ip(), username, password, use_openssl);
+            const int result = m_agent->connect_printer(get_dev_id(), get_dev_ip(), username, password, use_openssl);
+            // Do not include printer credentials or addresses in connection diagnostics.
+            BOOST_LOG_TRIVIAL(info) << "Local printer connection requested: result=" << result
+                                    << ", use_openssl=" << use_openssl;
+            return result;
         } catch (...) {
             ;
         }

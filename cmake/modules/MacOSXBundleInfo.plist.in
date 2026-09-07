@@ -2,6 +2,8 @@
 <!DOCTYPE plist PUBLIC "-//Apple Computer//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+  <key>NSLocalNetworkUsageDescription</key>
+  <string>Bambu Studio needs local network access to discover printers, receive printer status, send print files, and display live video.</string>
   <key>CFBundleDevelopmentRegion</key>
   <string>English</string>
   <key>CFBundleExecutable</key>
